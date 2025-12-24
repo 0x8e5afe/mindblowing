@@ -10,142 +10,35 @@
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-  function safeCopy(text) {
-    // Clipboard API is often blocked on file:// (not a secure context).
-    // Fallback to execCommand copy.
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).catch(() => fallback());
-    } else {
-      fallback();
-    }
-    function fallback() {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.setAttribute('readonly', 'true');
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      try { document.execCommand('copy'); } catch (e) {}
-      document.body.removeChild(ta);
-    }
-  }
-
-  // ---------- Data model (ported from the TS project) ----------
+  // ---------- Data model ----------
   const NODE_WIDTH = 250;
   const NODE_HEIGHT = 100;
-  const HORIZONTAL_GAP = 100;
-  const VERTICAL_GAP = 150;
-
-  function buildMindMap(root, startX=0, startY=0) {
-    const nodes = [];
-    const edges = [];
-
-    function traverse(node, x, y, parentId) {
-      let childrenSpan = 0;
-
-      if (node.children && node.children.length > 0) {
-        const childX = x + NODE_WIDTH + HORIZONTAL_GAP;
-        let childY = y;
-
-        for (const child of node.children) {
-          const childHeightUsed = traverse(child, childX, childY, node.id);
-          const span = childHeightUsed - childY;
-          childY = childHeightUsed;
-          childrenSpan += span;
-        }
-
-        // If a category has children, ensure it has at least one "row"
-        childrenSpan = Math.max(childrenSpan, NODE_HEIGHT + 20);
-      } else {
-        childrenSpan = NODE_HEIGHT + 20; // leaf node height with padding
-      }
-
-      const myY = y + (childrenSpan / 2) - (NODE_HEIGHT / 2);
-
-      nodes.push({
-        id: node.id,
-        x,
-        y: myY,
-        data: { ...node.data, status: 'default' }
-      });
-
-      if (parentId) {
-        edges.push({
-          id: `e-${parentId}-${node.id}`,
-          source: parentId,
-          target: node.id
-        });
-      }
-
-      return Math.max(y + childrenSpan, y + VERTICAL_GAP);
-    }
-
-    traverse(root, startX, startY, undefined);
-    return { nodes, edges };
-  }
 
   // ---------- Mode data ----------
-  const generalTree = window.MINDMAP_GENERAL_TREE;
-  const adTree = window.MINDMAP_AD_TREE;
+  const generalData = window.MINDMAP_GENERAL_DATA;
+  const adData = window.MINDMAP_AD_DATA;
+  const utils = window.MINDMAP_UTILS;
 
-  if (!generalTree || !adTree) {
+  if (!generalData || !adData || !utils) {
     console.warn("Mindblowing: map data is missing. Check general-map.js/ad-map.js.");
   }
 
-  const generalPentestData = generalTree ? buildMindMap(generalTree) : { nodes: [], edges: [] };
-  const adPentestData = adTree ? buildMindMap(adTree) : { nodes: [], edges: [] };
-
   const MODES = {
-    GENERAL: { name: 'General Pentest', data: generalPentestData },
-    AD: { name: 'Active Directory', data: adPentestData }
-  };
-
-  // ---------- Icons (offline-friendly; simple emoji mapping) ----------
-  const ICON = {
-    Shield: '🛡️',
-    Search: '🔎',
-    Eye: '👁️',
-    Globe: '🌐',
-    List: '📋',
-    Activity: '📈',
-    Target: '🎯',
-    Folder: '📁',
-    Sword: '⚔️',
-    Database: '🗄️',
-    Code: '💻',
-    Upload: '⬆️',
-    Wifi: '📶',
-    Lock: '🔒',
-    Terminal: '🧑‍💻',
-    Flag: '🚩',
-    Server: '🖥️',
-    Clock: '⏱️',
-    Monitor: '🖥️',
-    User: '👤',
-    Castle: '🏰',
-    Key: '🔑',
-    Radio: '📡',
-    ArrowRight: '➡️',
-    Network: '🕸️',
-    Map: '🗺️',
-    Share2: '🔀',
-    Flame: '🔥',
-    Unlock: '🔓',
-    Repeat: '🔁',
-    Hash: '#️⃣',
-    Cpu: '🧠',
-    Crown: '👑',
-    Download: '⬇️',
-    Ticket: '🎟️',
-    File: '📄',
-    Bomb: '💣'
+    GENERAL: { name: 'General Pentest', data: generalData && utils ? utils.buildGraph(generalData) : { nodes: [], edges: [] } },
+    AD: { name: 'Active Directory', data: adData && utils ? utils.buildGraph(adData) : { nodes: [], edges: [] } }
   };
 
   // ---------- App state ----------
   let modeKey = 'GENERAL';
   let reached = new Set();
-  let selectedId = null;
+  let reachable = new Set();
+  let selectedItem = null; // { type: 'node' | 'edge', id }
+  let draggingNodeId = null;
+  let dragStart = null;
+  let dragMoved = false;
+  let suppressClickUntil = 0;
+  let dragPending = false;
+  let dragTarget = null;
 
   // view transform
   let tx = 0, ty = 0, scale = 1;
@@ -153,7 +46,12 @@
   // current map
   let map = null; // {nodes, edges}
   let nodeById = new Map();
-  let parentById = new Map();
+  let edgeById = new Map();
+  let adjacency = new Map();
+  let edgeIdsByNode = new Map();
+  let edgePathById = new Map();
+  let edgeHitById = new Map();
+  let nodeElById = new Map();
 
   const storageKey = (k) => `mindblowing.static.${k}`;
   const storageReachedKey = () => storageKey(`reached.${modeKey}`);
@@ -198,28 +96,42 @@
     $('#zoomLabel').innerText = `${Math.round(scale*100)}%`;
   }
 
-  function computeParents() {
-    parentById = new Map();
+  function computeAdjacency() {
+    adjacency = new Map();
+    edgeById = new Map();
+    edgeIdsByNode = new Map();
     for (const e of map.edges) {
-      parentById.set(e.target, e.source);
+      edgeById.set(e.id, e);
+      if (!adjacency.has(e.source)) adjacency.set(e.source, []);
+      adjacency.get(e.source).push(e.target);
+      if (!edgeIdsByNode.has(e.source)) edgeIdsByNode.set(e.source, []);
+      if (!edgeIdsByNode.has(e.target)) edgeIdsByNode.set(e.target, []);
+      edgeIdsByNode.get(e.source).push(e.id);
+      edgeIdsByNode.get(e.target).push(e.id);
+    }
+  }
+
+  function computeReachable() {
+    reachable = new Set();
+    if (reached.size === 0) return;
+    for (const id of reached) {
+      const neighbors = adjacency.get(id) || [];
+      for (const next of neighbors) reachable.add(next);
     }
   }
 
   function recomputeStatus() {
-    // Match the original: if any reached nodes exist,
+    // If any reached nodes exist,
     // - reached nodes => reached
-    // - root or parent is reached => accessible
+    // - reachable nodes from reached => reachable
     // - otherwise => dimmed
+    computeReachable();
     for (const n of map.nodes) {
       let status = 'default';
       if (reached.size > 0) {
         if (reached.has(n.id)) status = 'reached';
-        else {
-          const isRoot = (n.data.type === 'root');
-          const parent = parentById.get(n.id);
-          const parentIsReached = parent && reached.has(parent);
-          status = (isRoot || parentIsReached) ? 'accessible' : 'dimmed';
-        }
+        else if (reachable.has(n.id)) status = 'reachable';
+        else status = 'dimmed';
       }
       n.data.status = status;
     }
@@ -230,28 +142,69 @@
     const s = n.data.status || 'default';
 
     const classes = ['node', `type-${t}`, `status-${s}`];
-    if (n.id === selectedId) classes.push('selected');
+    if (selectedItem?.type === 'node' && n.id === selectedItem.id) classes.push('selected');
     return classes.join(' ');
   }
 
-  function edgePath(sx, sy, tx2, ty2) {
-    // Smoothstep-ish bezier
-    const x1 = sx + NODE_WIDTH;
-    const y1 = sy + NODE_HEIGHT / 2;
-    const x2 = tx2;
-    const y2 = ty2 + NODE_HEIGHT / 2;
+  function edgeClass(e) {
+    const classes = ['edge'];
+    if (selectedItem?.type === 'edge' && e.id === selectedItem.id) classes.push('edge-selected');
+    if (reached.size > 0 && reached.has(e.source)) {
+      classes.push('edge-reachable');
+    }
+    return classes.join(' ');
+  }
 
-    const midX = (x1 + x2) / 2;
+  function anchorPoint(cx, cy, dx, dy) {
+    const hw = NODE_WIDTH / 2;
+    const hh = NODE_HEIGHT / 2;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      return { x: cx + (dx >= 0 ? hw : -hw), y: cy };
+    }
+    return { x: cx, y: cy + (dy >= 0 ? hh : -hh) };
+  }
+
+  function edgePathForEdge(e) {
+    // Smoothstep-ish bezier from node border to node border.
+    const sNode = nodeById.get(e.source);
+    const tNode = nodeById.get(e.target);
+    if (!sNode || !tNode) return null;
+
+    const sCx = sNode.x + NODE_WIDTH / 2;
+    const sCy = sNode.y + NODE_HEIGHT / 2;
+    const tCx = tNode.x + NODE_WIDTH / 2;
+    const tCy = tNode.y + NODE_HEIGHT / 2;
+
+    const s = anchorPoint(sCx, sCy, tCx - sCx, tCy - sCy);
+    const t = anchorPoint(tCx, tCy, sCx - tCx, sCy - tCy);
+
+    const midX = (s.x + t.x) / 2;
     const c1x = midX;
-    const c1y = y1;
+    const c1y = s.y;
     const c2x = midX;
-    const c2y = y2;
-    return `M ${x1} ${y1} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${x2} ${y2}`;
+    const c2y = t.y;
+    return `M ${s.x} ${s.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${t.x} ${t.y}`;
+  }
+
+  function borderPoint(cx, cy, tx, ty) {
+    const dx = tx - cx;
+    const dy = ty - cy;
+    const hw = NODE_WIDTH / 2;
+    const hh = NODE_HEIGHT / 2;
+    if (dx === 0 && dy === 0) return { x: cx, y: cy };
+    const txScale = dx === 0 ? Infinity : Math.abs(hw / dx);
+    const tyScale = dy === 0 ? Infinity : Math.abs(hh / dy);
+    const t = Math.min(txScale, tyScale);
+    return { x: cx + dx * t, y: cy + dy * t };
   }
 
   function render() {
     if (!map) return;
     nodeById = new Map(map.nodes.map(n => [n.id, n]));
+    edgeById = new Map(map.edges.map(e => [e.id, e]));
+    edgePathById = new Map();
+    edgeHitById = new Map();
+    nodeElById = new Map();
 
     recomputeStatus();
     // Resize edge SVG so paths are always visible (simple oversized canvas)
@@ -268,14 +221,27 @@
     // edges
     elEdges.innerHTML = '';
     for (const e of map.edges) {
-      const s = nodeById.get(e.source);
-      const t = nodeById.get(e.target);
-      if (!s || !t) continue;
+      const d = edgePathForEdge(e);
+      if (!d) continue;
 
       const p = document.createElementNS('http://www.w3.org/2000/svg','path');
-      p.setAttribute('d', edgePath(s.x, s.y, t.x, t.y));
-      p.setAttribute('class', 'edge');
+      p.setAttribute('d', d);
+      p.setAttribute('class', edgeClass(e));
+      p.setAttribute('marker-end', 'url(#arrowHead)');
+      p.dataset.id = e.id;
       elEdges.appendChild(p);
+      edgePathById.set(e.id, p);
+
+      const hit = document.createElementNS('http://www.w3.org/2000/svg','path');
+      hit.setAttribute('d', d);
+      hit.setAttribute('class', 'edge-hit');
+      hit.dataset.id = e.id;
+      hit.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        selectEdge(e.id);
+      });
+      elEdges.appendChild(hit);
+      edgeHitById.set(e.id, hit);
     }
 
     // nodes
@@ -283,11 +249,10 @@
     for (const n of map.nodes) {
       const div = document.createElement('div');
       div.className = nodeClass(n);
-      div.style.left = `${n.x}px`;
-      div.style.top  = `${n.y}px`;
+      div.style.transform = `translate(${n.x}px, ${n.y}px)`;
       div.dataset.id = n.id;
 
-      const icon = ICON[n.data.icon] || '•';
+      const icon = n.data.emoji || '•';
       div.innerHTML = `
         <div class="nodeIcon" aria-hidden="true">${icon}</div>
         <div class="nodeText">
@@ -296,26 +261,116 @@
         </div>
       `;
 
+      div.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0) return;
+        ev.stopPropagation();
+        draggingNodeId = n.id;
+        dragStart = { x: ev.clientX, y: ev.clientY, nodeX: n.x, nodeY: n.y };
+        dragMoved = false;
+        div.classList.add('dragging');
+        document.documentElement.classList.add('isDragging');
+        div.setPointerCapture(ev.pointerId);
+      });
+
       div.addEventListener('click', (ev) => {
         ev.stopPropagation();
+        if (Date.now() < suppressClickUntil) return;
         selectNode(n.id);
       });
 
       elNodes.appendChild(div);
+      nodeElById.set(n.id, div);
     }
 
     // keep selection styles current
     updateNodeStyles();
+    updateEdgeStyles();
 
     // If nothing selected, hide panel.
-    if (selectedId && !nodeById.get(selectedId)) {
-      selectedId = null;
+    if (selectedItem?.type === 'node' && !nodeById.get(selectedItem.id)) {
+      selectedItem = null;
+      closePanel();
+    }
+    if (selectedItem?.type === 'edge' && !edgeById.get(selectedItem.id)) {
+      selectedItem = null;
       closePanel();
     }
   }
 
   function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function renderMarkdown(input) {
+    const lines = String(input ?? '').split(/\r?\n/);
+    let html = '';
+    let inCode = false;
+    let listOpen = false;
+
+    const flushList = () => {
+      if (listOpen) {
+        html += '</ul>';
+        listOpen = false;
+      }
+    };
+
+    const inlineMd = (text) => {
+      let out = escapeHtml(text);
+      out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+      out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+      out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+      return out;
+    };
+
+    for (const line of lines) {
+      if (line.startsWith('```')) {
+        if (!inCode) {
+          flushList();
+          inCode = true;
+          html += '<pre><code>';
+        } else {
+          inCode = false;
+          html += '</code></pre>';
+        }
+        continue;
+      }
+
+      if (inCode) {
+        html += `${escapeHtml(line)}\n`;
+        continue;
+      }
+
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushList();
+        continue;
+      }
+
+      const headingMatch = trimmed.match(/^(#{1,3})\s+(.*)$/);
+      if (headingMatch) {
+        flushList();
+        const level = headingMatch[1].length;
+        html += `<h${level}>${inlineMd(headingMatch[2])}</h${level}>`;
+        continue;
+      }
+
+      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        if (!listOpen) {
+          html += '<ul>';
+          listOpen = true;
+        }
+        html += `<li>${inlineMd(trimmed.slice(2))}</li>`;
+        continue;
+      }
+
+      flushList();
+      html += `<p>${inlineMd(trimmed)}</p>`;
+    }
+
+    flushList();
+    if (inCode) html += '</code></pre>';
+    return html;
   }
 
   function updateNodeStyles() {
@@ -327,27 +382,78 @@
     });
   }
 
+  function updateEdgeStyles() {
+    $$('.edge', elEdges).forEach(el => {
+      const id = el.dataset.id;
+      const e = edgeById.get(id);
+      if (!e) return;
+      el.setAttribute('class', edgeClass(e));
+    });
+  }
+
+  function updateEdgesForNode(nodeId) {
+    const edgeIds = edgeIdsByNode.get(nodeId) || [];
+    for (const edgeId of edgeIds) {
+      const e = edgeById.get(edgeId);
+      if (!e) continue;
+      const d = edgePathForEdge(e);
+      if (!d) continue;
+      const edgeEl = edgePathById.get(edgeId);
+      const hitEl = edgeHitById.get(edgeId);
+      if (edgeEl) edgeEl.setAttribute('d', d);
+      if (hitEl) hitEl.setAttribute('d', d);
+    }
+  }
+
+  function scheduleDragFrame() {
+    if (dragPending) return;
+    dragPending = true;
+    requestAnimationFrame(() => {
+      dragPending = false;
+      if (!draggingNodeId || !dragTarget) return;
+      const n = nodeById.get(draggingNodeId);
+      const el = nodeElById.get(draggingNodeId);
+      if (!n || !el) return;
+      n.x = dragTarget.x;
+      n.y = dragTarget.y;
+      el.style.transform = `translate(${n.x}px, ${n.y}px)`;
+      updateEdgesForNode(draggingNodeId);
+    });
+  }
+
   // ---------- Detail panel ----------
   function selectNode(id) {
-    selectedId = id;
+    selectedItem = { type: 'node', id };
     updateNodeStyles();
+    updateEdgeStyles();
     const n = nodeById.get(id);
     if (!n) return;
 
-    openPanel(n);
+    openNodePanel(n);
   }
 
-  function openPanel(n) {
+  function selectEdge(id) {
+    selectedItem = { type: 'edge', id };
+    updateNodeStyles();
+    updateEdgeStyles();
+    const e = edgeById.get(id);
+    if (!e) return;
+    openEdgePanel(e);
+  }
+
+  function openNodePanel(n) {
     elPanel.classList.add('open');
     elPanelTitle.textContent = n.data.label || '';
     elPanelSubtitle.textContent = (n.data.type || '').toLowerCase();
 
     const isReached = reached.has(n.id);
+    elReachedBtn.classList.remove('isHidden');
     elReachedBtn.classList.toggle('isReached', isReached);
-    elReachedBtn.innerText = isReached ? '✅ COMPROMISED' : '⭕ Mark Status';
+    elReachedBtn.innerText = isReached ? '🟢 FOCUSED' : '🟢 Focus';
 
     const resources = (n.data.resources || []);
     const commands = (n.data.commands || []);
+    const descriptionMd = n.data.descriptionMd || n.data.description || '';
 
     const resHtml = resources.length ? `
       <div class="panelSection">
@@ -369,7 +475,6 @@
             <div class="cmdCard" data-cmd-index="${idx}">
               <div class="cmdHeader">
                 <span class="cmdDesc">${escapeHtml(c.description)}</span>
-                <button class="btn btnSmall copyBtn" type="button">Copy</button>
               </div>
               <pre class="cmdCode"><code>${escapeHtml(c.code)}</code></pre>
             </div>
@@ -381,27 +486,37 @@
     elPanelBody.innerHTML = `
       <div class="panelSection">
         <div class="sectionTitle">Description</div>
-        <div class="panelText">${escapeHtml(n.data.description)}</div>
+        <div class="panelText md">${renderMarkdown(descriptionMd)}</div>
       </div>
       ${resHtml}
       ${cmdHtml}
     `;
 
-    $$('.copyBtn', elPanelBody).forEach((btn) => {
-      btn.addEventListener('click', (ev) => {
-        const card = ev.target.closest('.cmdCard');
-        if (!card) return;
-        const idx = Number(card.dataset.cmdIndex);
-        const cmd = commands[idx];
-        if (cmd) safeCopy(cmd.code);
-      });
-    });
+  }
+
+  function openEdgePanel(e) {
+    elPanel.classList.add('open');
+    elPanelTitle.textContent = e.data?.label || 'Connection';
+    elPanelSubtitle.textContent = (e.data?.type || 'connection').toLowerCase();
+    elReachedBtn.classList.add('isHidden');
+
+    const sourceLabel = nodeById.get(e.source)?.data?.label || e.source;
+    const targetLabel = nodeById.get(e.target)?.data?.label || e.target;
+    const fallbackMd = `**${sourceLabel}** -> **${targetLabel}**`;
+    const descriptionMd = e.data?.descriptionMd || e.data?.description || fallbackMd;
+    elPanelBody.innerHTML = `
+      <div class="panelSection">
+        <div class="sectionTitle">Description</div>
+        <div class="panelText md">${renderMarkdown(descriptionMd)}</div>
+      </div>
+    `;
   }
 
   function closePanel() {
     elPanel.classList.remove('open');
-    selectedId = null;
+    selectedItem = null;
     updateNodeStyles();
+    updateEdgeStyles();
   }
 
   $('#closePanel').addEventListener('click', (e) => {
@@ -411,12 +526,13 @@
 
   elReachedBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (!selectedId) return;
-    if (reached.has(selectedId)) reached.delete(selectedId);
-    else reached.add(selectedId);
+    if (!selectedItem || selectedItem.type !== 'node') return;
+    const id = selectedItem.id;
+    if (reached.has(id)) reached.delete(id);
+    else reached.add(id);
     persistReached();
     render();
-    if (selectedId) selectNode(selectedId); // refresh panel state
+    if (selectedItem?.type === 'node') selectNode(selectedItem.id); // refresh panel state
   });
 
   // ---------- Mode switching ----------
@@ -442,9 +558,9 @@
     elModeAd.classList.toggle('active', modeKey === 'AD');
 
     map = MODES[modeKey].data;
-    computeParents();
+    computeAdjacency();
     loadReached();
-    selectedId = null;
+    selectedItem = null;
     closePanel();
 
     render();
@@ -509,6 +625,8 @@
     if (e.button !== 0) return;
     const onNode = e.target.closest('.node');
     if (onNode) return;
+    const onEdge = e.target.closest('.edge-hit, .edge');
+    if (onEdge) return;
     const onControls = e.target.closest('.zoomDock, .hintDock');
     if (onControls) return;
 
@@ -518,6 +636,14 @@
   });
 
   elCanvas.addEventListener('pointermove', (e) => {
+    if (draggingNodeId && dragStart) {
+      const dx = (e.clientX - dragStart.x) / scale;
+      const dy = (e.clientY - dragStart.y) / scale;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) dragMoved = true;
+      dragTarget = { x: dragStart.nodeX + dx, y: dragStart.nodeY + dy };
+      scheduleDragFrame();
+      return;
+    }
     if (!panning || !panStart) return;
     const dx = e.clientX - panStart.x;
     const dy = e.clientY - panStart.y;
@@ -525,6 +651,20 @@
   });
 
   elCanvas.addEventListener('pointerup', (e) => {
+    if (draggingNodeId) {
+      const el = nodeElById.get(draggingNodeId);
+      if (el) {
+        el.classList.remove('dragging');
+        try { el.releasePointerCapture(e.pointerId); } catch {}
+      }
+      draggingNodeId = null;
+      dragStart = null;
+      if (dragMoved) suppressClickUntil = Date.now() + 200;
+      dragMoved = false;
+      dragTarget = null;
+      document.documentElement.classList.remove('isDragging');
+      return;
+    }
     panning = false;
     panStart = null;
     try { elCanvas.releasePointerCapture(e.pointerId); } catch {}

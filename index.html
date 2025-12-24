@@ -282,17 +282,47 @@
       left: 0;
       top: 0;
       overflow: visible;
-      pointer-events: none;
+      pointer-events: auto;
     }
 
     .edge {
       fill: none;
       stroke: var(--text-tertiary);
+      color: var(--text-tertiary);
       stroke-width: 2;
       stroke-linecap: round;
       opacity: 0.3;
       transition: opacity 0.3s ease;
       filter: blur(0.5px);
+      pointer-events: none;
+    }
+
+    .isDragging .edge,
+    .isDragging .edge-reachable,
+    .isDragging .edge-selected {
+      transition: none;
+      filter: none;
+    }
+
+    .edge-reachable {
+      stroke: #22c55e;
+      color: #22c55e;
+      opacity: 0.55;
+      filter: blur(0.2px);
+    }
+
+    .edge-selected {
+      stroke: #16a34a;
+      color: #16a34a;
+      opacity: 0.9;
+      filter: none;
+    }
+
+    .edge-hit {
+      fill: none;
+      stroke: transparent;
+      stroke-width: 14;
+      pointer-events: stroke;
     }
 
     #nodes {
@@ -317,6 +347,12 @@
       cursor: pointer;
       transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
       box-shadow: var(--shadow-md);
+      will-change: transform;
+    }
+
+    .node.dragging {
+      transition: none;
+      cursor: grabbing;
     }
 
     .node::before {
@@ -427,13 +463,15 @@
     }
 
     .status-reached {
-      background: linear-gradient(135deg, rgba(239, 68, 68, 0.1) 0%, rgba(220, 38, 38, 0.1) 100%);
-      border-color: #ef4444;
+      background: linear-gradient(135deg, rgba(34, 197, 94, 0.18) 0%, rgba(16, 185, 129, 0.18) 100%);
+      border-color: #16a34a;
+      box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.35), 0 10px 30px rgba(34, 197, 94, 0.25);
     }
 
-    .status-accessible {
+    .status-reachable {
       border-color: #22c55e;
-      border-style: dashed;
+      background: linear-gradient(135deg, rgba(34, 197, 94, 0.06) 0%, rgba(34, 197, 94, 0.1) 100%);
+      opacity: 0.85;
     }
 
     /* Gorgeous Detail Panel */
@@ -503,10 +541,10 @@
     }
 
     #toggleReached.isReached {
-      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
       color: white;
       border: none;
-      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+      box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
     }
 
     #panelBody {
@@ -542,6 +580,64 @@
       font-size: 14px;
       line-height: 1.6;
       color: var(--text-secondary);
+    }
+
+    .panelText.md h1,
+    .panelText.md h2,
+    .panelText.md h3 {
+      color: var(--text-primary);
+      font-weight: 700;
+      margin: 0 0 8px;
+      line-height: 1.3;
+    }
+
+    .panelText.md p {
+      margin: 0 0 10px;
+    }
+
+    .panelText.md ul {
+      margin: 0 0 12px 18px;
+      padding: 0;
+    }
+
+    .panelText.md li {
+      margin-bottom: 6px;
+    }
+
+    .panelText.md code {
+      background: rgba(99, 102, 241, 0.1);
+      border-radius: 6px;
+      padding: 2px 6px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    .panelText.md pre {
+      background: rgba(15, 23, 42, 0.08);
+      border-radius: 12px;
+      padding: 12px;
+      overflow: auto;
+      margin: 0 0 12px;
+    }
+
+    .panelText.md pre code {
+      background: none;
+      padding: 0;
+      font-size: 12px;
+    }
+
+    .panelText.md a {
+      color: #4f46e5;
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    .panelText.md a:hover {
+      text-decoration: underline;
+    }
+
+    .isHidden {
+      display: none !important;
     }
 
     /* Elegant Link Cards */
@@ -762,6 +858,11 @@
       <div id="canvas" aria-label="Mind map canvas">
         <div id="world">
           <svg id="edgesSvg">
+            <defs>
+              <marker id="arrowHead" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                <path d="M 0 0 L 12 6 L 0 12 z" fill="currentColor"></path>
+              </marker>
+            </defs>
             <g id="edges"></g>
           </svg>
           <div id="nodes" aria-label="Mind map nodes"></div>
@@ -804,6 +905,7 @@
     </footer>
   </div>
 
+  <script src="./utils.js"></script>
   <script src="./general-map.js"></script>
   <script src="./ad-map.js"></script>
   <script src="./script.js"></script>
