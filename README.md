@@ -69,6 +69,6 @@ This project is licensed under the **MIT License**. See [`LICENSE`](LICENSE) for
 
 Made with ❤️ by [Giuseppe Toscano](https://gtoscano.me)
 
-[⭐ Star on GitHub]([https://github.com/0x8e5afe/cybersuite](https://github.com/0x8e5afe/mindblowing/)
+[⭐ Star on GitHub]([https://github.com/0x8e5afe/cybersuite](https://github.com/0x8e5afe/mindblowing/))
 
 </div>
