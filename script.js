@@ -13,6 +13,9 @@
   // ---------- Data model ----------
   const NODE_WIDTH = 250;
   const NODE_HEIGHT = 100;
+  const EDGE_IO_SPLIT = 12;
+  const MIN_SCALE = 0.05;
+  const FULL_VIEW_SCALE = 0.15;
 
   // ---------- Mode data ----------
   const generalData = window.MINDMAP_GENERAL_DATA;
@@ -33,6 +36,7 @@
   let reached = new Set();
   let reachable = new Set();
   let selectedItem = null; // { type: 'node' | 'edge', id }
+  let focusedNodeId = null;
   let draggingNodeId = null;
   let dragStart = null;
   let dragMoved = false;
@@ -52,6 +56,7 @@
   let edgePathById = new Map();
   let edgeHitById = new Map();
   let nodeElById = new Map();
+  let edgeSideUsage = new Map();
 
   const storageKey = (k) => `mindblowing.static.${k}`;
   const storageReachedKey = () => storageKey(`reached.${modeKey}`);
@@ -76,6 +81,7 @@
   const elZoomOut = $('#zoomOut');
   const elZoomFit = $('#zoomFit');
   const elZoomReset = $('#zoomReset');
+  const elZoomLabel = $('#zoomLabel');
 
   // ---------- Theme ----------
   function applyTheme(isDark) {
@@ -92,8 +98,9 @@
   // ---------- Rendering ----------
   function setTransform(nextTx, nextTy, nextScale) {
     tx = nextTx; ty = nextTy; scale = nextScale;
-    elWorld.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
-    $('#zoomLabel').innerText = `${Math.round(scale*100)}%`;
+    elWorld.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
+    elZoomLabel.innerText = `${Math.round(scale*100)}%`;
+    document.documentElement.classList.toggle('isZoomedOut', scale < 0.55);
   }
 
   function computeAdjacency() {
@@ -111,10 +118,10 @@
     }
   }
 
-  function computeReachable() {
+  function computeReachableFrom(baseSet) {
     reachable = new Set();
-    if (reached.size === 0) return;
-    for (const id of reached) {
+    if (!baseSet || baseSet.size === 0) return;
+    for (const id of baseSet) {
       const neighbors = adjacency.get(id) || [];
       for (const next of neighbors) reachable.add(next);
     }
@@ -125,11 +132,15 @@
     // - reached nodes => reached
     // - reachable nodes from reached => reachable
     // - otherwise => dimmed
-    computeReachable();
+    const baseSet = reached.size > 0
+      ? reached
+      : (focusedNodeId ? new Set([focusedNodeId]) : null);
+
+    computeReachableFrom(baseSet);
     for (const n of map.nodes) {
       let status = 'default';
-      if (reached.size > 0) {
-        if (reached.has(n.id)) status = 'reached';
+      if (baseSet && baseSet.size > 0) {
+        if (baseSet.has(n.id)) status = 'reached';
         else if (reachable.has(n.id)) status = 'reachable';
         else status = 'dimmed';
       }
@@ -149,7 +160,10 @@
   function edgeClass(e) {
     const classes = ['edge'];
     if (selectedItem?.type === 'edge' && e.id === selectedItem.id) classes.push('edge-selected');
-    if (reached.size > 0 && reached.has(e.source)) {
+    const hasFocus = reached.size > 0
+      ? reached.has(e.source)
+      : (focusedNodeId && e.source === focusedNodeId);
+    if (hasFocus) {
       classes.push('edge-reachable');
     }
     return classes.join(' ');
@@ -175,8 +189,18 @@
     const tCx = tNode.x + NODE_WIDTH / 2;
     const tCy = tNode.y + NODE_HEIGHT / 2;
 
-    const s = anchorPoint(sCx, sCy, tCx - sCx, tCy - sCy);
-    const t = anchorPoint(tCx, tCy, sCx - tCx, sCy - tCy);
+    const dx = tCx - sCx;
+    const dy = tCy - sCy;
+    const sSide = edgeSideForVector(dx, dy);
+    const tSide = edgeSideForVector(-dx, -dy);
+    const s = anchorPoint(sCx, sCy, dx, dy);
+    const t = anchorPoint(tCx, tCy, -dx, -dy);
+    const sOffset = edgeIoOffset(e.source, sSide, true);
+    const tOffset = edgeIoOffset(e.target, tSide, false);
+    s.x += sOffset.x;
+    s.y += sOffset.y;
+    t.x += tOffset.x;
+    t.y += tOffset.y;
 
     const midX = (s.x + t.x) / 2;
     const c1x = midX;
@@ -185,6 +209,60 @@
     const c2y = t.y;
     return `M ${s.x} ${s.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${t.x} ${t.y}`;
   }
+
+  function edgeSideForVector(dx, dy) {
+    if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? 'right' : 'left';
+    return dy >= 0 ? 'bottom' : 'top';
+  }
+
+  function computeEdgeSideUsage() {
+    edgeSideUsage = new Map();
+    for (const e of map.edges) {
+      const sNode = nodeById.get(e.source);
+      const tNode = nodeById.get(e.target);
+      if (!sNode || !tNode) continue;
+      const sCx = sNode.x + NODE_WIDTH / 2;
+      const sCy = sNode.y + NODE_HEIGHT / 2;
+      const tCx = tNode.x + NODE_WIDTH / 2;
+      const tCy = tNode.y + NODE_HEIGHT / 2;
+      const dx = tCx - sCx;
+      const dy = tCy - sCy;
+      const sSide = edgeSideForVector(dx, dy);
+      const tSide = edgeSideForVector(-dx, -dy);
+
+      const sEntry = ensureEdgeSideEntry(e.source);
+      const tEntry = ensureEdgeSideEntry(e.target);
+      sEntry[sSide].out = true;
+      tEntry[tSide].in = true;
+    }
+  }
+
+  function ensureEdgeSideEntry(nodeId) {
+    let entry = edgeSideUsage.get(nodeId);
+    if (!entry) {
+      entry = {
+        left: { in: false, out: false },
+        right: { in: false, out: false },
+        top: { in: false, out: false },
+        bottom: { in: false, out: false }
+      };
+      edgeSideUsage.set(nodeId, entry);
+    }
+    return entry;
+  }
+
+  function edgeIoOffset(nodeId, side, isOutgoing) {
+    const usage = edgeSideUsage.get(nodeId);
+    const info = usage ? usage[side] : null;
+    if (!info || !(info.in && info.out)) return { x: 0, y: 0 };
+    const dir = isOutgoing ? -1 : 1;
+    const shift = EDGE_IO_SPLIT / 2;
+    if (side === 'left' || side === 'right') {
+      return { x: 0, y: dir * shift };
+    }
+    return { x: dir * shift, y: 0 };
+  }
+
 
   function borderPoint(cx, cy, tx, ty) {
     const dx = tx - cx;
@@ -205,6 +283,11 @@
     edgePathById = new Map();
     edgeHitById = new Map();
     nodeElById = new Map();
+    computeEdgeSideUsage();
+
+    if (focusedNodeId && !nodeById.get(focusedNodeId)) {
+      focusedNodeId = null;
+    }
 
     recomputeStatus();
     // Resize edge SVG so paths are always visible (simple oversized canvas)
@@ -249,7 +332,7 @@
     for (const n of map.nodes) {
       const div = document.createElement('div');
       div.className = nodeClass(n);
-      div.style.transform = `translate(${n.x}px, ${n.y}px)`;
+      div.style.transform = `translate3d(${n.x}px, ${n.y}px, 0)`;
       div.dataset.id = n.id;
 
       const icon = n.data.emoji || '•';
@@ -416,16 +499,36 @@
       if (!n || !el) return;
       n.x = dragTarget.x;
       n.y = dragTarget.y;
-      el.style.transform = `translate(${n.x}px, ${n.y}px)`;
+      el.style.transform = `translate3d(${n.x}px, ${n.y}px, 0)`;
       updateEdgesForNode(draggingNodeId);
     });
   }
 
   // ---------- Detail panel ----------
-  function selectNode(id) {
-    selectedItem = { type: 'node', id };
+  function refreshFocus() {
+    if (!map) return;
+    recomputeStatus();
     updateNodeStyles();
     updateEdgeStyles();
+  }
+
+  function setFocusNode(id) {
+    focusedNodeId = id;
+    refreshFocus();
+  }
+
+  function clearFocus() {
+    if (!focusedNodeId) {
+      refreshFocus();
+      return;
+    }
+    focusedNodeId = null;
+    refreshFocus();
+  }
+
+  function selectNode(id) {
+    selectedItem = { type: 'node', id };
+    setFocusNode(id);
     const n = nodeById.get(id);
     if (!n) return;
 
@@ -434,8 +537,7 @@
 
   function selectEdge(id) {
     selectedItem = { type: 'edge', id };
-    updateNodeStyles();
-    updateEdgeStyles();
+    clearFocus();
     const e = edgeById.get(id);
     if (!e) return;
     openEdgePanel(e);
@@ -449,7 +551,8 @@
     const isReached = reached.has(n.id);
     elReachedBtn.classList.remove('isHidden');
     elReachedBtn.classList.toggle('isReached', isReached);
-    elReachedBtn.innerText = isReached ? '🟢 FOCUSED' : '🟢 Focus';
+    elReachedBtn.setAttribute('aria-pressed', isReached ? 'true' : 'false');
+    elReachedBtn.title = isReached ? 'Unpin focus' : 'Pin focus';
 
     const resources = (n.data.resources || []);
     const commands = (n.data.commands || []);
@@ -515,8 +618,7 @@
   function closePanel() {
     elPanel.classList.remove('open');
     selectedItem = null;
-    updateNodeStyles();
-    updateEdgeStyles();
+    clearFocus();
   }
 
   $('#closePanel').addEventListener('click', (e) => {
@@ -590,12 +692,32 @@
 
     const sx = (cw - padding*2) / contentW;
     const sy = (ch - padding*2) / contentH;
-    const s = clamp(Math.min(sx, sy), 0.15, 2.5);
+    const s = clamp(Math.min(sx, sy), MIN_SCALE, 2.5);
 
     const x = -minX * s + (cw - contentW * s) / 2;
     const y = -minY * s + (ch - contentH * s) / 2;
 
     setTransform(x, y, s);
+  }
+
+  function centerAtScale(scaleValue, padding=60) {
+    if (!map || map.nodes.length === 0) return;
+    const cw = elCanvas.clientWidth;
+    const ch = elCanvas.clientHeight;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of map.nodes) {
+      minX = Math.min(minX, n.x);
+      minY = Math.min(minY, n.y);
+      maxX = Math.max(maxX, n.x + NODE_WIDTH);
+      maxY = Math.max(maxY, n.y + NODE_HEIGHT);
+    }
+
+    const contentW = (maxX - minX);
+    const contentH = (maxY - minY);
+    const x = -minX * scaleValue + (cw - contentW * scaleValue) / 2;
+    const y = -minY * scaleValue + (ch - contentH * scaleValue) / 2;
+    setTransform(x, y, scaleValue);
   }
 
   function zoomAt(factor, clientX, clientY) {
@@ -606,20 +728,40 @@
     const wx = (mx - tx) / scale;
     const wy = (my - ty) / scale;
 
-    const newScale = clamp(scale * factor, 0.15, 3.5);
+    const newScale = clamp(scale * factor, MIN_SCALE, 3.5);
     const newTx = mx - wx * newScale;
     const newTy = my - wy * newScale;
 
+    if (newScale <= FULL_VIEW_SCALE + 0.0001) {
+      centerAtScale(newScale);
+      return;
+    }
     setTransform(newTx, newTy, newScale);
   }
 
   elZoomIn.addEventListener('click', () => zoomAt(1.15, elCanvas.clientWidth/2, elCanvas.clientHeight/2));
   elZoomOut.addEventListener('click', () => zoomAt(1/1.15, elCanvas.clientWidth/2, elCanvas.clientHeight/2));
   elZoomFit.addEventListener('click', () => fitToView());
-  elZoomReset.addEventListener('click', () => setTransform(40, 40, 1));
+  elZoomReset.addEventListener('click', () => setTransform(40, 40, 0.3));
 
   let panning = false;
   let panStart = null;
+  let panPending = false;
+  let panTarget = null;
+  let panMoved = false;
+  let pinchMoved = false;
+  let pinchStart = null;
+  const activePointers = new Map();
+
+  function schedulePanFrame() {
+    if (panPending) return;
+    panPending = true;
+    requestAnimationFrame(() => {
+      panPending = false;
+      if (!panning || !panTarget) return;
+      setTransform(panTarget.x, panTarget.y, scale);
+    });
+  }
 
   elCanvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
@@ -630,12 +772,30 @@
     const onControls = e.target.closest('.zoomDock, .hintDock');
     if (onControls) return;
 
-    panning = true;
-    panStart = { x: e.clientX, y: e.clientY, tx, ty };
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     elCanvas.setPointerCapture(e.pointerId);
+    if (activePointers.size === 1) {
+      panning = true;
+      panStart = { x: e.clientX, y: e.clientY, tx, ty };
+      panMoved = false;
+      pinchStart = null;
+      document.documentElement.classList.add('isPanning');
+    } else if (activePointers.size === 2) {
+      const pts = Array.from(activePointers.values());
+      const dx = pts[1].x - pts[0].x;
+      const dy = pts[1].y - pts[0].y;
+      pinchStart = { distance: Math.hypot(dx, dy), scale, tx, ty };
+      pinchMoved = false;
+      panning = false;
+      panStart = null;
+      document.documentElement.classList.add('isPanning');
+    }
   });
 
   elCanvas.addEventListener('pointermove', (e) => {
+    if (activePointers.has(e.pointerId)) {
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
     if (draggingNodeId && dragStart) {
       const dx = (e.clientX - dragStart.x) / scale;
       const dy = (e.clientY - dragStart.y) / scale;
@@ -644,10 +804,37 @@
       scheduleDragFrame();
       return;
     }
+    if (pinchStart && activePointers.size >= 2) {
+      const pts = Array.from(activePointers.values());
+      const dx = pts[1].x - pts[0].x;
+      const dy = pts[1].y - pts[0].y;
+      const dist = Math.hypot(dx, dy);
+      const factor = dist / (pinchStart.distance || dist);
+      const nextScale = clamp(pinchStart.scale * factor, MIN_SCALE, 3.5);
+      const centerX = (pts[0].x + pts[1].x) / 2;
+      const centerY = (pts[0].y + pts[1].y) / 2;
+      const rect = elCanvas.getBoundingClientRect();
+      const mx = centerX - rect.left;
+      const my = centerY - rect.top;
+      const wx = (mx - tx) / scale;
+      const wy = (my - ty) / scale;
+      const newTx = mx - wx * nextScale;
+      const newTy = my - wy * nextScale;
+      if (nextScale <= FULL_VIEW_SCALE + 0.0001) {
+        centerAtScale(nextScale);
+        return;
+      }
+      setTransform(newTx, newTy, nextScale);
+      pinchMoved = true;
+      return;
+    }
+
     if (!panning || !panStart) return;
     const dx = e.clientX - panStart.x;
     const dy = e.clientY - panStart.y;
-    setTransform(panStart.tx + dx, panStart.ty + dy, scale);
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) panMoved = true;
+    panTarget = { x: panStart.tx + dx, y: panStart.ty + dy };
+    schedulePanFrame();
   });
 
   elCanvas.addEventListener('pointerup', (e) => {
@@ -665,8 +852,42 @@
       document.documentElement.classList.remove('isDragging');
       return;
     }
+    if (activePointers.has(e.pointerId)) {
+      activePointers.delete(e.pointerId);
+    }
+    if (pinchStart && pinchMoved) suppressClickUntil = Date.now() + 200;
+    if (panMoved) suppressClickUntil = Date.now() + 200;
+
+    if (activePointers.size === 1) {
+      const pt = Array.from(activePointers.values())[0];
+      panning = true;
+      panStart = { x: pt.x, y: pt.y, tx, ty };
+      panMoved = false;
+      pinchStart = null;
+      pinchMoved = false;
+    } else if (activePointers.size === 0) {
+      panning = false;
+      panStart = null;
+      panTarget = null;
+      pinchStart = null;
+      pinchMoved = false;
+      panMoved = false;
+      document.documentElement.classList.remove('isPanning');
+    }
+    try { elCanvas.releasePointerCapture(e.pointerId); } catch {}
+  });
+
+  elCanvas.addEventListener('pointercancel', (e) => {
+    if (activePointers.has(e.pointerId)) {
+      activePointers.delete(e.pointerId);
+    }
     panning = false;
     panStart = null;
+    panTarget = null;
+    pinchStart = null;
+    pinchMoved = false;
+    panMoved = false;
+    document.documentElement.classList.remove('isPanning');
     try { elCanvas.releasePointerCapture(e.pointerId); } catch {}
   });
 
@@ -678,6 +899,7 @@
 
   // background click closes panel
   elCanvas.addEventListener('click', (e) => {
+    if (Date.now() < suppressClickUntil) return;
     if (e.target.closest('.zoomDock, .hintDock')) return;
     closePanel();
   });
@@ -695,7 +917,7 @@
   // ---------- Init ----------
   function init() {
     loadTheme();
-    setTransform(40, 40, 1);
+    setTransform(40, 40, 0.3);
     setMode('GENERAL');
   }
 

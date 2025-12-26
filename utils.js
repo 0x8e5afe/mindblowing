@@ -1,8 +1,8 @@
 (() => {
   const NODE_WIDTH = 250;
   const NODE_HEIGHT = 100;
-  const HORIZONTAL_GAP = 100;
-  const VERTICAL_GAP = 150;
+  const HORIZONTAL_GAP = 2000;
+  const VERTICAL_GAP = 10;
 
   function layoutTree(root, startX=0, startY=0) {
     const nodes = [];
@@ -68,7 +68,7 @@
     const width = (maxX - minX) + NODE_WIDTH;
     const height = (maxY - minY) + NODE_HEIGHT;
     if (height <= width) return;
-    const factor = (height / width) * 1.005;
+    const factor = Math.min((height / width) * 1.03, 2.2);
     for (const n of nodes) {
       n.x = minX + (n.x - minX) * factor;
     }
