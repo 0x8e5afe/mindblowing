@@ -55,3 +55,20 @@ mindblowing/
 ├─ script.js        # App logic + rendering
 ├─ general-map.js   # General Pentest mindmap data
 └─ ad-map.js        # Active Directory mindmap data
+```
+
+---
+
+## 📜 License
+
+This project is licensed under the **MIT License**. See [`LICENSE`](LICENSE) for details.
+
+---
+
+<div align="center">
+
+Made with ❤️ by [Giuseppe Toscano](https://gtoscano.me)
+
+[⭐ Star on GitHub]([https://github.com/0x8e5afe/cybersuite](https://github.com/0x8e5afe/mindblowing/)
+
+</div>
