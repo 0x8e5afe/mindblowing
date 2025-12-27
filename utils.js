@@ -2,7 +2,7 @@
   const NODE_WIDTH = 250;
   const NODE_HEIGHT = 100;
   const HORIZONTAL_GAP = 2000;
-  const VERTICAL_GAP = 10;
+  const VERTICAL_GAP = 40;
 
   function layoutTree(root, startX=0, startY=0) {
     const nodes = [];
@@ -22,9 +22,9 @@
           childrenSpan += span;
         }
 
-        childrenSpan = Math.max(childrenSpan, NODE_HEIGHT + 20);
+        childrenSpan = Math.max(childrenSpan, NODE_HEIGHT + VERTICAL_GAP);
       } else {
-        childrenSpan = NODE_HEIGHT + 20;
+        childrenSpan = NODE_HEIGHT + VERTICAL_GAP;
       }
 
       const myY = y + (childrenSpan / 2) - (NODE_HEIGHT / 2);

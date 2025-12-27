@@ -118,6 +118,41 @@
     }
   }
 
+  function normalizeLayoutForScale(targetScale, padding=60) {
+    if (!map || !map.nodes.length || map._layoutNormalized) return;
+
+    const cw = elCanvas.clientWidth;
+    const ch = elCanvas.clientHeight;
+    if (!cw || !ch) return;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of map.nodes) {
+      minX = Math.min(minX, n.x);
+      minY = Math.min(minY, n.y);
+      maxX = Math.max(maxX, n.x + NODE_WIDTH);
+      maxY = Math.max(maxY, n.y + NODE_HEIGHT);
+    }
+
+    const contentW = (maxX - minX);
+    const contentH = (maxY - minY);
+    const sx = (cw - padding * 2) / contentW;
+    const sy = (ch - padding * 2) / contentH;
+
+    let scaleX = 1;
+    let scaleY = 1;
+    if (sx < targetScale) scaleX = sx / targetScale;
+    // Preserve vertical spacing to avoid node overlap on dense columns.
+
+    if (scaleX !== 1 || scaleY !== 1) {
+      for (const n of map.nodes) {
+        n.x = minX + (n.x - minX) * scaleX;
+        n.y = minY + (n.y - minY) * scaleY;
+      }
+    }
+
+    map._layoutNormalized = true;
+  }
+
   function computeReachableFrom(baseSet) {
     reachable = new Set();
     if (!baseSet || baseSet.size === 0) return;
@@ -660,6 +695,7 @@
     elModeAd.classList.toggle('active', modeKey === 'AD');
 
     map = MODES[modeKey].data;
+    normalizeLayoutForScale(FULL_VIEW_SCALE, 40);
     computeAdjacency();
     loadReached();
     selectedItem = null;
@@ -673,7 +709,15 @@
   elModeAd.addEventListener('click', () => setMode('AD'));
 
   // ---------- Zoom / pan ----------
-  function fitToView(padding=60) {
+  function getFitPadding() {
+    const cw = elCanvas.clientWidth;
+    if (cw <= 520) return 20;
+    if (cw <= 768) return 36;
+    return 60;
+  }
+
+  function fitToView(padding) {
+    const pad = padding ?? getFitPadding();
     if (!map || map.nodes.length === 0) return;
 
     const cw = elCanvas.clientWidth;
@@ -690,8 +734,8 @@
     const contentW = (maxX - minX);
     const contentH = (maxY - minY);
 
-    const sx = (cw - padding*2) / contentW;
-    const sy = (ch - padding*2) / contentH;
+    const sx = (cw - pad*2) / contentW;
+    const sy = (ch - pad*2) / contentH;
     const s = clamp(Math.min(sx, sy), MIN_SCALE, 2.5);
 
     const x = -minX * s + (cw - contentW * s) / 2;
