@@ -16,6 +16,8 @@
   const EDGE_IO_SPLIT = 12;
   const MIN_SCALE = 0.05;
   const FULL_VIEW_SCALE = 0.15;
+  const FOCUS_SCALE = 0.9;
+  const MAX_SEARCH_RESULTS = 40;
 
   // ---------- Mode data ----------
   const generalData = window.MINDMAP_GENERAL_DATA;
@@ -43,6 +45,9 @@
   let suppressClickUntil = 0;
   let dragPending = false;
   let dragTarget = null;
+  let searchIndex = [];
+  let searchOpen = false;
+  let lastSearchQuery = '';
 
   // view transform
   let tx = 0, ty = 0, scale = 1;
@@ -82,6 +87,13 @@
   const elZoomFit = $('#zoomFit');
   const elZoomReset = $('#zoomReset');
   const elZoomLabel = $('#zoomLabel');
+  const elSearchToggle = $('#searchToggle');
+  const elSearchModal = $('#searchModal');
+  const elSearchClose = $('#searchClose');
+  const elSearchInput = $('#searchInput');
+  const elSearchResults = $('#searchResults');
+  const elSearchCount = $('#searchCount');
+  const elSearchSubtitle = $('#searchSubtitle');
 
   // ---------- Theme ----------
   function applyTheme(isDark) {
@@ -419,6 +431,47 @@
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
+  function summarizeText(text) {
+    return String(text ?? '').split(/\r?\n/)[0].trim();
+  }
+
+  function highlightMatches(text, tokens) {
+    const value = String(text ?? '');
+    if (!tokens.length) return escapeHtml(value);
+    const lower = value.toLowerCase();
+    const ranges = [];
+    for (const token of tokens) {
+      if (!token) continue;
+      const t = token.toLowerCase();
+      let start = 0;
+      while (start < lower.length) {
+        const index = lower.indexOf(t, start);
+        if (index === -1) break;
+        ranges.push([index, index + t.length]);
+        start = index + t.length;
+      }
+    }
+    if (!ranges.length) return escapeHtml(value);
+    ranges.sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    for (const range of ranges) {
+      if (!merged.length || range[0] > merged[merged.length - 1][1]) {
+        merged.push(range);
+      } else {
+        merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], range[1]);
+      }
+    }
+    let out = '';
+    let cursor = 0;
+    for (const [start, end] of merged) {
+      if (start > cursor) out += escapeHtml(value.slice(cursor, start));
+      out += `<mark>${escapeHtml(value.slice(start, end))}</mark>`;
+      cursor = end;
+    }
+    if (cursor < value.length) out += escapeHtml(value.slice(cursor));
+    return out;
+  }
+
   function renderMarkdown(input) {
     const lines = String(input ?? '').split(/\r?\n/);
     let html = '';
@@ -489,6 +542,106 @@
     flushList();
     if (inCode) html += '</code></pre>';
     return html;
+  }
+
+  function buildSearchIndex() {
+    if (!map) {
+      searchIndex = [];
+      return;
+    }
+    searchIndex = map.nodes.map((n) => {
+      const label = n.data.label || '';
+      const description = summarizeText(n.data.description || n.data.descriptionMd || '');
+      const type = n.data.type || 'node';
+      const emoji = n.data.emoji || '•';
+      const haystack = `${label}\n${description}\n${n.data.descriptionMd || ''}`.toLowerCase();
+      return { id: n.id, label, description, type, emoji, haystack };
+    });
+  }
+
+  function updateSearchSubtitle() {
+    if (!elSearchSubtitle) return;
+    elSearchSubtitle.textContent = `Searching ${MODES[modeKey].name}`;
+  }
+
+  function scoreSearchEntry(entry, tokens) {
+    if (!tokens.length) return 0;
+    const label = entry.label.toLowerCase();
+    const description = entry.description.toLowerCase();
+    let score = 0;
+    for (const token of tokens) {
+      if (!entry.haystack.includes(token)) return 0;
+      if (label.includes(token)) score += 6;
+      if (label.startsWith(token)) score += 3;
+      if (description.includes(token)) score += 2;
+    }
+    return score;
+  }
+
+  function renderSearchResults(query) {
+    if (!elSearchResults) return;
+    const raw = String(query ?? '').trim();
+    lastSearchQuery = raw;
+    const tokens = raw ? raw.toLowerCase().split(/\s+/).filter(Boolean) : [];
+
+    if (!tokens.length) {
+      elSearchCount.textContent = '';
+      elSearchResults.innerHTML = `
+        <div class="searchEmpty">Start typing to search the ${MODES[modeKey].name} map.</div>
+      `;
+      return;
+    }
+
+    const ranked = searchIndex.map((entry) => ({
+      ...entry,
+      score: scoreSearchEntry(entry, tokens)
+    })).filter((entry) => entry.score > 0);
+
+    ranked.sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
+
+    const total = ranked.length;
+    const shown = ranked.slice(0, MAX_SEARCH_RESULTS);
+    const countLabel = total > MAX_SEARCH_RESULTS
+      ? `${MAX_SEARCH_RESULTS}+ results`
+      : `${total} ${total === 1 ? 'result' : 'results'}`;
+    elSearchCount.textContent = total ? countLabel : 'No results';
+
+    if (!shown.length) {
+      elSearchResults.innerHTML = `
+        <div class="searchEmpty">No matches yet. Try a different term.</div>
+      `;
+      return;
+    }
+
+    elSearchResults.innerHTML = shown.map((entry) => `
+      <button class="searchResult" type="button" data-node-id="${entry.id}">
+        <div class="searchResultIcon" aria-hidden="true">${escapeHtml(entry.emoji)}</div>
+        <div class="searchResultText">
+          <div class="searchResultLabel">${highlightMatches(entry.label, tokens)}</div>
+          <div class="searchResultDesc">${highlightMatches(entry.description, tokens)}</div>
+        </div>
+        <div class="searchResultMeta">
+          <span class="searchTag">${escapeHtml(entry.type.toUpperCase())}</span>
+        </div>
+      </button>
+    `).join('');
+  }
+
+  function openSearchModal() {
+    if (!elSearchModal) return;
+    searchOpen = true;
+    elSearchModal.classList.add('open');
+    elSearchModal.setAttribute('aria-hidden', 'false');
+    elSearchInput.value = lastSearchQuery;
+    renderSearchResults(elSearchInput.value);
+    requestAnimationFrame(() => elSearchInput.focus());
+  }
+
+  function closeSearchModal() {
+    if (!elSearchModal) return;
+    searchOpen = false;
+    elSearchModal.classList.remove('open');
+    elSearchModal.setAttribute('aria-hidden', 'true');
   }
 
   function updateNodeStyles() {
@@ -578,6 +731,11 @@
     openEdgePanel(e);
   }
 
+  function focusAndSelectNode(id, targetScale) {
+    selectNode(id);
+    focusNodeInView(id, targetScale);
+  }
+
   function openNodePanel(n) {
     elPanel.classList.add('open');
     elPanelTitle.textContent = n.data.label || '';
@@ -592,6 +750,8 @@
     const resources = (n.data.resources || []);
     const commands = (n.data.commands || []);
     const descriptionMd = n.data.descriptionMd || n.data.description || '';
+    const nextIds = Array.from(new Set(adjacency.get(n.id) || []));
+    const nextNodes = nextIds.map((id) => nodeById.get(id)).filter(Boolean);
 
     const resHtml = resources.length ? `
       <div class="panelSection">
@@ -621,6 +781,24 @@
       </div>
     ` : '';
 
+    const nextHtml = nextNodes.length ? `
+      <div class="panelSection">
+        <div class="sectionTitle">Next Nodes</div>
+        <div class="nextNodesList">
+          ${nextNodes.map((node) => `
+            <button class="nextNodeCard" type="button" data-node-id="${node.id}">
+              <div class="nextNodeIcon" aria-hidden="true">${escapeHtml(node.data.emoji || '•')}</div>
+              <div class="nextNodeText">
+                <div class="nextNodeLabel">${escapeHtml(node.data.label)}</div>
+                <div class="nextNodeDesc">${escapeHtml(node.data.description || '')}</div>
+              </div>
+              <div class="nextNodeType">${escapeHtml((node.data.type || 'node').toUpperCase())}</div>
+            </button>
+          `).join('')}
+        </div>
+      </div>
+    ` : '';
+
     elPanelBody.innerHTML = `
       <div class="panelSection">
         <div class="sectionTitle">Description</div>
@@ -628,7 +806,9 @@
       </div>
       ${resHtml}
       ${cmdHtml}
+      ${nextHtml}
     `;
+    elPanelBody.scrollTop = 0;
 
   }
 
@@ -648,12 +828,20 @@
         <div class="panelText md">${renderMarkdown(descriptionMd)}</div>
       </div>
     `;
+    elPanelBody.scrollTop = 0;
   }
 
   function closePanel() {
     elPanel.classList.remove('open');
     selectedItem = null;
     clearFocus();
+    elPanelTitle.textContent = 'Select a node';
+    elPanelSubtitle.textContent = '';
+    elPanelBody.innerHTML = '';
+    elPanelBody.scrollTop = 0;
+    elReachedBtn.classList.add('isHidden');
+    elReachedBtn.classList.remove('isReached');
+    elReachedBtn.setAttribute('aria-pressed', 'false');
   }
 
   $('#closePanel').addEventListener('click', (e) => {
@@ -670,6 +858,14 @@
     persistReached();
     render();
     if (selectedItem?.type === 'node') selectNode(selectedItem.id); // refresh panel state
+  });
+
+  elPanelBody.addEventListener('click', (e) => {
+    const card = e.target.closest('.nextNodeCard');
+    if (!card) return;
+    const id = card.dataset.nodeId;
+    if (!id) return;
+    focusAndSelectNode(id, FOCUS_SCALE);
   });
 
   // ---------- Mode switching ----------
@@ -698,11 +894,14 @@
     normalizeLayoutForScale(FULL_VIEW_SCALE, 40);
     computeAdjacency();
     loadReached();
+    buildSearchIndex();
+    updateSearchSubtitle();
     selectedItem = null;
     closePanel();
 
     render();
     fitToView();
+    if (searchOpen) renderSearchResults(elSearchInput.value);
   }
 
   elModeGeneral.addEventListener('click', () => setMode('GENERAL'));
@@ -761,6 +960,17 @@
     const contentH = (maxY - minY);
     const x = -minX * scaleValue + (cw - contentW * scaleValue) / 2;
     const y = -minY * scaleValue + (ch - contentH * scaleValue) / 2;
+    setTransform(x, y, scaleValue);
+  }
+
+  function focusNodeInView(nodeId, targetScale) {
+    const n = nodeById.get(nodeId);
+    if (!n) return;
+    const scaleValue = clamp(targetScale ?? Math.max(scale, FOCUS_SCALE), MIN_SCALE, 3.5);
+    const cx = n.x + NODE_WIDTH / 2;
+    const cy = n.y + NODE_HEIGHT / 2;
+    const x = (elCanvas.clientWidth / 2) - (cx * scaleValue);
+    const y = (elCanvas.clientHeight / 2) - (cy * scaleValue);
     setTransform(x, y, scaleValue);
   }
 
@@ -949,7 +1159,36 @@
   });
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closePanel();
+    if (e.key === 'Escape') {
+      if (searchOpen) closeSearchModal();
+      else closePanel();
+    }
+  });
+
+  // ---------- Search ----------
+  elSearchToggle.addEventListener('click', () => {
+    openSearchModal();
+  });
+
+  elSearchClose.addEventListener('click', () => {
+    closeSearchModal();
+  });
+
+  elSearchModal.addEventListener('click', (e) => {
+    if (e.target === elSearchModal) closeSearchModal();
+  });
+
+  elSearchInput.addEventListener('input', () => {
+    renderSearchResults(elSearchInput.value);
+  });
+
+  elSearchResults.addEventListener('click', (e) => {
+    const result = e.target.closest('.searchResult');
+    if (!result) return;
+    const id = result.dataset.nodeId;
+    if (!id) return;
+    closeSearchModal();
+    focusAndSelectNode(id, FOCUS_SCALE);
   });
 
   // ---------- Theme button ----------
